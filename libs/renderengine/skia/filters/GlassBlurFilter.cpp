@@ -31,7 +31,6 @@
 #include <SkSurface.h>
 #include <SkTileMode.h>
 #include <SkSamplingOptions.h>
-#include <SkImageFilters.h>
 #include <include/gpu/GpuTypes.h>
 #include <include/gpu/ganesh/SkSurfaceGanesh.h>
 #include <log/log.h>
@@ -43,6 +42,60 @@ namespace android {
 namespace renderengine {
 namespace skia {
 
+const SkString kEffectSource_GlassBlurFilter_UpSampleEffect(R"(
+    uniform shader child;
+    uniform float in_blurOffset;
+    uniform float in_crossFade;
+    uniform float in_weightedCrossFade;
+
+    const float2 STEP_0 = float2( 1.0, 0.0);
+    const float2 STEP_1 = float2( 0.623489802,  0.781831482);
+    const float2 STEP_2 = float2(-0.222520934,  0.974927912);
+    const float2 STEP_3 = float2(-0.900968868,  0.433883739);
+    const float2 STEP_4 = float2( 0.900968868, -0.433883739);
+    const float2 STEP_5 = float2(-0.222520934, -0.974927912);
+    const float2 STEP_6 = float2(-0.623489802, -0.781831482);
+
+    half4 main(float2 xy) {
+        half3 c = child.eval(xy).rgb;
+        c += child.eval(xy + STEP_0 * in_blurOffset).rgb;
+        c += child.eval(xy + STEP_1 * in_blurOffset).rgb;
+        c += child.eval(xy + STEP_2 * in_blurOffset).rgb;
+        c += child.eval(xy + STEP_3 * in_blurOffset).rgb;
+        c += child.eval(xy + STEP_4 * in_blurOffset).rgb;
+        c += child.eval(xy + STEP_5 * in_blurOffset).rgb;
+        c += child.eval(xy + STEP_6 * in_blurOffset).rgb;
+        return half4(c * in_weightedCrossFade, in_crossFade);
+    }
+)");
+
+const SkString kEffectSource_GlassBlurFilter_FinalUpSampleEffect(R"(
+    uniform shader child;
+    uniform float in_blurOffset;
+    uniform float in_crossFade;
+    uniform float in_weightedCrossFade;
+
+    const float2 STEP_0 = float2( 1.0, 0.0);
+    const float2 STEP_1 = float2( 0.623489802,  0.781831482);
+    const float2 STEP_2 = float2(-0.222520934,  0.974927912);
+    const float2 STEP_3 = float2(-0.900968868,  0.433883739);
+    const float2 STEP_4 = float2( 0.900968868, -0.433883739);
+    const float2 STEP_5 = float2(-0.222520934, -0.974927912);
+    const float2 STEP_6 = float2(-0.623489802, -0.781831482);
+
+    half4 main(float2 xy) {
+        half3 c = child.eval(xy).rgb;
+        c += child.eval(xy + STEP_0 * in_blurOffset).rgb;
+        c += child.eval(xy + STEP_1 * in_blurOffset).rgb;
+        c += child.eval(xy + STEP_2 * in_blurOffset).rgb;
+        c += child.eval(xy + STEP_3 * in_blurOffset).rgb;
+        c += child.eval(xy + STEP_4 * in_blurOffset).rgb;
+        c += child.eval(xy + STEP_5 * in_blurOffset).rgb;
+        c += child.eval(xy + STEP_6 * in_blurOffset).rgb;
+        return half4(c * in_weightedCrossFade, in_crossFade);
+    }
+)");
+
 GlassBlurFilter::GlassBlurFilter(RuntimeEffectManager& effectManager)
       : BlurFilter(effectManager) {
     mQuarterResDownSampleBlurEffect =
@@ -50,7 +103,9 @@ GlassBlurFilter::GlassBlurFilter(RuntimeEffectManager& effectManager)
     mHalfResDownSampleBlurEffect =
             effectManager.mKnownEffects[kKawaseBlurDualFilterV2_HalfResDownSampleBlurEffect];
     mUpSampleBlurEffect =
-            effectManager.mKnownEffects[kKawaseBlurDualFilterV2_UpSampleBlurEffect];
+            effectManager.mKnownEffects[kGlassBlurFilter_UpSampleEffect];
+    mFinalUpSampleBlurEffect =
+            effectManager.mKnownEffects[kGlassBlurFilter_FinalUpSampleEffect];
 }
 
 void GlassBlurFilter::blurInto(const sk_sp<SkSurface>& drawSurface,
@@ -70,7 +125,9 @@ void GlassBlurFilter::blurInto(const sk_sp<SkSurface>& drawSurface, sk_sp<SkShad
                                 const float radius, const float alpha,
                                 const sk_sp<SkRuntimeEffect>& blurEffect) const {
     SkPaint paint;
-    if (blurEffect == mUpSampleBlurEffect) {
+    const bool isUpsample =
+            blurEffect == mUpSampleBlurEffect || blurEffect == mFinalUpSampleBlurEffect;
+    if (isUpsample) {
         if (radius == 0) {
             paint.setShader(std::move(input));
             paint.setAlphaf(alpha);
@@ -96,8 +153,8 @@ sk_sp<SkImage> GlassBlurFilter::generate(SkiaGpuContext* context, const uint32_t
                                           const SkRect& blurRect) const {
     const float radius = blurRadius * 0.57735f;
 
-    constexpr int kMaxSurfaces = 4;
-    const float filterDepth = std::min(kMaxSurfaces - 1.0f, radius * kInputScale / 2.5f);
+    constexpr int kMaxSurfaces = 3;
+    const float filterDepth = std::min(kMaxSurfaces - 1.0f, radius * kInputScale / 3.0f);
     const int filterPasses = std::min(kMaxSurfaces - 1, static_cast<int>(ceil(filterDepth)));
 
     SkIRect targetBlurRect;
@@ -117,8 +174,7 @@ sk_sp<SkImage> GlassBlurFilter::generate(SkiaGpuContext* context, const uint32_t
     sk_sp<SkSurface> surfaces[kMaxSurfaces] =
             {filterPasses >= 0 ? makeSurface(1 * kInverseInputScale) : nullptr,
              filterPasses >= 1 ? makeSurface(2 * kInverseInputScale) : nullptr,
-             filterPasses >= 2 ? makeSurface(4 * kInverseInputScale) : nullptr,
-             filterPasses >= 3 ? makeSurface(8 * kInverseInputScale) : nullptr};
+             filterPasses >= 2 ? makeSurface(4 * kInverseInputScale) : nullptr};
 
     float sumSquaredR = 0;
     float sumSquaredStep = 0;
@@ -147,19 +203,11 @@ sk_sp<SkImage> GlassBlurFilter::generate(SkiaGpuContext* context, const uint32_t
     }
 
     for (int i = filterPasses - 1; i >= 0; i--) {
+        const sk_sp<SkRuntimeEffect>& upEffect =
+                (i == 0) ? mFinalUpSampleBlurEffect : mUpSampleBlurEffect;
         blurInto(surfaces[i], surfaces[i + 1]->makeTemporaryImage(), step,
-                 std::min(1.0f, filterDepth - i), mUpSampleBlurEffect);
+                 std::min(1.0f, filterDepth - i), upEffect);
     }
-
-    const float sigmaScale = blurRadius * kInputScale * 0.5f;
-    SkPaint overlayPaint;
-    overlayPaint.setBlendMode(SkBlendMode::kSrc);
-    sk_sp<SkImageFilter> finalFilter = SkImageFilters::Blur(sigmaScale, sigmaScale,
-                                                            SkTileMode::kClamp, nullptr);
-    overlayPaint.setImageFilter(finalFilter);
-
-    sk_sp<SkImage> preFinal = surfaces[0]->makeTemporaryImage();
-    surfaces[0]->getCanvas()->drawImage(preFinal.get(), 0, 0, SkSamplingOptions(), &overlayPaint);
 
     return surfaces[0]->makeTemporaryImage();
 }

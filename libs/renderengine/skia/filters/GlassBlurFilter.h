@@ -40,6 +40,7 @@ private:
     sk_sp<SkRuntimeEffect> mQuarterResDownSampleBlurEffect;
     sk_sp<SkRuntimeEffect> mHalfResDownSampleBlurEffect;
     sk_sp<SkRuntimeEffect> mUpSampleBlurEffect;
+    sk_sp<SkRuntimeEffect> mFinalUpSampleBlurEffect;
 
     void blurInto(const sk_sp<SkSurface>& drawSurface, const sk_sp<SkImage>& readImage,
                   const float radius, const float alpha, const sk_sp<SkRuntimeEffect>&) const;
